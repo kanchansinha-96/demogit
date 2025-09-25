@@ -1,1 +1,47 @@
-ghdhdh
+try {
+stage("Build") {
+// build logic here
+}
+stage("Test") {
+// test logic here
+}
+currentBuild.result = "SUCCESS"
+sendNotification("SUCCESS")
+} catch (Exception e) {
+currentBuild.result = "FAILURE"
+sendNotification("FAILURE", env.STAGE_NAME, e.getMessage())
+throw e
+} finally {
+if (currentBuild.result == "ABORTED") {
+sendNotification("ABORTED")
+}
+}
+
+===================================
+def sendNotification(buildStatus, stageName = null, errorMessage = null) {
+if (buildStatus == "ABORTED") {
+echo "Build aborted, no notification triggered."
+return
+}
+
+def buildData = [:]
+buildData["pipelineURL"] = env.BUILD_URL
+buildData["triggeredBy"] = "${currentBuild.getBuildCauses()[0].userName}"
+buildData["triggeredByEmail"] = ""
+buildData["status"] = buildStatus
+
+if (buildStatus == "FAILURE") {
+buildData["stage"] = stageName
+buildData["errorMessage"] = errorMessage
+} else if (buildStatus == "SUCCESS") {
+buildData["stage"] = "NA"
+}
+
+def buildDataJson = groovy.json.JsonOutput.toJson(buildData)
+
+def channelUrl = getProductWorkflowURL()
+if (channelUrl) {
+notifyTeam(buildDataJson, channelUrl)
+}
+}
+
