@@ -25,8 +25,46 @@ def call(Map config = [:]) {
     def buildUrl = env.BUILD_URL ?: 'N/A'
     def jobName = env.JOB_NAME ?: 'Unknown Job'
     def buildNumber = env.BUILD_NUMBER ?: 'N/A'
-    def buildDuration = currentBuild.durationString?.replace(' and counting', '') ?: 'N/A'
-    def triggeredBy = getTriggeredBy()
+    def triggeredByInfo = getTriggeredByDetails()
+    
+    // Build facts array with only required fields
+    def facts = [
+        [
+            "name": "Pipeline URL:",
+            "value": buildUrl
+        ],
+        [
+            "name": "Status:",
+            "value": status
+        ]
+    ]
+    
+    // Add triggered by user name
+    if (triggeredByInfo.userName) {
+        facts << [
+            "name": "Triggered By:",
+            "value": triggeredByInfo.userName
+        ]
+    }
+    
+    // Add user email if available
+    if (triggeredByInfo.userEmail) {
+        facts << [
+            "name": "Triggered By Email:",
+            "value": triggeredByInfo.userEmail
+        ]
+    }
+    
+    // Add failed stage if build failed
+    if (status == 'FAILURE' || status == 'UNSTABLE') {
+        def failedStage = getFailedStage()
+        if (failedStage) {
+            facts << [
+                "name": "Failed Stage:",
+                "value": failedStage
+            ]
+        }
+    }
     
     def payload = [
         "@type": "MessageCard",
@@ -38,24 +76,7 @@ def call(Map config = [:]) {
             [
                 "activityTitle": "**${jobName}**",
                 "activitySubtitle": "Build #${buildNumber}",
-                "facts": [
-                    [
-                        "name": "Status:",
-                        "value": status
-                    ],
-                    [
-                        "name": "Duration:",
-                        "value": buildDuration
-                    ],
-                    [
-                        "name": "Triggered By:",
-                        "value": triggeredBy
-                    ],
-                    [
-                        "name": "Folder:",
-                        "value": folderName
-                    ]
-                ],
+                "facts": facts,
                 "text": customMessage
             ]
         ],
@@ -73,22 +94,26 @@ def call(Map config = [:]) {
         ]
     ]
     
-    // Add failure details if build failed
-    if (status == 'FAILURE' || status == 'UNSTABLE') {
-        def failureDetails = getFailureDetails()
-        if (failureDetails) {
-            payload.sections[0].facts << [
-                "name": "Failure Reason:",
-                "value": failureDetails
-            ]
-        }
-    }
-    
     // Write JSON payload to temporary file
     def jsonPayload = groovy.json.JsonOutput.toJson(payload)
+    
+    // Pretty print JSON for better readability in logs
+    def prettyJson = groovy.json.JsonOutput.prettyPrint(jsonPayload)
+    
     def tempFile = "${env.WORKSPACE}/teams-payload-${env.BUILD_NUMBER}.json"
     
-    writeFile file: tempFile, text: jsonPayload
+    writeFile file: tempFile, text: jsonPayload, encoding: 'UTF-8'
+    
+    echo "JSON payload created:"
+    echo prettyJson
+    
+    // Verify file was created
+    def fileExists = fileExists(tempFile)
+    if (!fileExists) {
+        error "Failed to create JSON payload file: ${tempFile}"
+    }
+    
+    echo "JSON file created successfully: ${tempFile}"
     
     // Send notification using curl
     sendTeamsNotification(webhookUrl, tempFile)
@@ -158,24 +183,49 @@ def getWebhookUrlForFolder(folderName) {
 
 def sendTeamsNotification(webhookUrl, jsonFile) {
     try {
+        // Validate JSON file exists and is valid
+        def jsonContent = readFile(jsonFile)
+        
+        // Validate it's proper JSON
+        try {
+            def parsedJson = new groovy.json.JsonSlurper().parseText(jsonContent)
+            echo "JSON payload validated successfully"
+        } catch (Exception e) {
+            error "Invalid JSON format: ${e.message}"
+        }
+        
         def curlCommand = """
-            curl -X POST '${webhookUrl}' \
-            -H 'Content-Type: application/json' \
-            -d @${jsonFile} \
-            --silent \
-            --show-error \
-            --fail
+            curl -X POST '${webhookUrl}' \\
+            -H 'Content-Type: application/json; charset=UTF-8' \\
+            -H 'Accept: application/json' \\
+            --data-binary @${jsonFile} \\
+            --silent \\
+            --show-error \\
+            --write-out '\\nHTTP_STATUS:%{http_code}' \\
+            --fail-with-body
         """
         
-        def result = sh(script: curlCommand, returnStatus: true)
+        def output = sh(script: curlCommand, returnStdout: true).trim()
         
-        if (result == 0) {
-            echo "Teams notification sent successfully"
+        // Parse HTTP status from output
+        def statusMatch = output =~ /HTTP_STATUS:(\d+)/
+        if (statusMatch) {
+            def httpStatus = statusMatch[0][1]
+            echo "Teams notification sent successfully. HTTP Status: ${httpStatus}"
+            
+            if (httpStatus != '200') {
+                echo "Warning: Received non-200 status. Response: ${output}"
+            }
         } else {
-            echo "Failed to send Teams notification. Curl exit code: ${result}"
+            echo "Teams notification sent. Response: ${output}"
         }
+        
     } catch (Exception e) {
         echo "Error sending Teams notification: ${e.message}"
+        echo "Please verify:"
+        echo "  1. Webhook URL is correct"
+        echo "  2. Teams connector is active"
+        echo "  3. JSON payload format is valid"
     }
 }
 
@@ -201,21 +251,53 @@ def getEmojiByStatus(status) {
     return emojis[status] ?: 'ℹ️'
 }
 
-def getTriggeredBy() {
-    def causes = currentBuild.getBuildCauses()
-    if (causes) {
-        def cause = causes[0]
-        if (cause._class.contains('UserIdCause')) {
-            return cause.userId ?: 'Manual Trigger'
-        } else if (cause._class.contains('SCMTrigger')) {
-            return 'SCM Change'
-        } else if (cause._class.contains('TimerTrigger')) {
-            return 'Scheduled'
-        } else if (cause._class.contains('UpstreamCause')) {
-            return "Upstream: ${cause.upstreamProject}"
+def getTriggeredByDetails() {
+    def result = [
+        userName: null,
+        userEmail: null
+    ]
+    
+    try {
+        def causes = currentBuild.getBuildCauses()
+        if (causes) {
+            def cause = causes[0]
+            
+            if (cause._class.contains('UserIdCause')) {
+                // Get user name
+                result.userName = cause.userName ?: cause.userId ?: 'Manual Trigger'
+                
+                // Try to get user email
+                if (cause.userId) {
+                    try {
+                        def user = hudson.model.User.get(cause.userId, false)
+                        if (user) {
+                            def emailProperty = user.getProperty(hudson.tasks.Mailer.UserProperty.class)
+                            if (emailProperty) {
+                                result.userEmail = emailProperty.getAddress()
+                            }
+                        }
+                    } catch (Exception e) {
+                        echo "Could not retrieve user email: ${e.message}"
+                    }
+                }
+            } else if (cause._class.contains('SCMTrigger')) {
+                result.userName = 'SCM Change'
+            } else if (cause._class.contains('TimerTrigger')) {
+                result.userName = 'Scheduled'
+            } else if (cause._class.contains('UpstreamCause')) {
+                result.userName = "Upstream: ${cause.upstreamProject}"
+            } else {
+                result.userName = 'Unknown'
+            }
+        } else {
+            result.userName = 'Unknown'
         }
+    } catch (Exception e) {
+        echo "Error getting triggered by details: ${e.message}"
+        result.userName = 'Unknown'
     }
-    return 'Unknown'
+    
+    return result
 }
 
 def isTriggeredByServiceAccount() {
@@ -252,15 +334,51 @@ def isTriggeredByServiceAccount() {
     return false
 }
 
-def getFailureDetails() {
+def getFailedStage() {
     try {
-        def log = currentBuild.rawBuild.getLog(50)
-        def errorLines = log.findAll { it.contains('ERROR') || it.contains('FAILED') || it.contains('Exception') }
-        if (errorLines) {
-            return errorLines.take(3).join(' | ')
+        // Get the execution details of the current build
+        def build = currentBuild.rawBuild
+        def execution = build.getExecution()
+        
+        if (execution) {
+            // Get all nodes (stages) in the pipeline
+            def nodes = execution.getCurrentHeads()
+            
+            // Look for failed stages
+            for (node in nodes) {
+                if (node.getError() != null) {
+                    def stageName = node.getDisplayName()
+                    echo "Found failed stage: ${stageName}"
+                    return stageName
+                }
+            }
+            
+            // Alternative method: Check through all nodes
+            def allNodes = execution.getNodes()
+            for (node in allNodes) {
+                if (node.getError() != null) {
+                    def stageName = node.getDisplayName()
+                    echo "Found failed stage: ${stageName}"
+                    return stageName
+                }
+            }
         }
+        
+        // Fallback: Try to extract from build log
+        def log = currentBuild.rawBuild.getLog(100)
+        for (line in log) {
+            // Look for stage failure patterns
+            if (line =~ /(?i)stage.*failed/ || line =~ /(?i)failed.*stage/) {
+                def matcher = line =~ /\[([^\]]+)\]/
+                if (matcher) {
+                    return matcher[0][1]
+                }
+            }
+        }
+        
     } catch (Exception e) {
-        echo "Could not retrieve failure details: ${e.message}"
+        echo "Could not retrieve failed stage: ${e.message}"
     }
-    return 'Check build logs for details'
+    
+    return "Unknown Stage"
 }
