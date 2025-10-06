@@ -1,0 +1,266 @@
+// vars/teamsNotification.groovy
+def call(Map config = [:]) {
+    def status = config.status ?: currentBuild.currentResult
+    def customMessage = config.message ?: ''
+    
+    // Check if triggered by service account
+    if (isTriggeredByServiceAccount()) {
+        echo "Build triggered by service account (svc). Skipping Teams notification."
+        return
+    }
+    
+    // Get folder name from job path
+    def folderName = getFolderName()
+    echo "Detected folder name: ${folderName}"
+    
+    // Load webhook URL from properties file
+    def webhookUrl = getWebhookUrlForFolder(folderName)
+    
+    if (!webhookUrl) {
+        error "No Teams webhook URL found for folder: ${folderName}"
+    }
+    
+    def color = getColorByStatus(status)
+    def statusEmoji = getEmojiByStatus(status)
+    def buildUrl = env.BUILD_URL ?: 'N/A'
+    def jobName = env.JOB_NAME ?: 'Unknown Job'
+    def buildNumber = env.BUILD_NUMBER ?: 'N/A'
+    def buildDuration = currentBuild.durationString?.replace(' and counting', '') ?: 'N/A'
+    def triggeredBy = getTriggeredBy()
+    
+    def payload = [
+        "@type": "MessageCard",
+        "@context": "https://schema.org/extensions",
+        "summary": "Jenkins Build Notification",
+        "themeColor": color,
+        "title": "${statusEmoji} Jenkins Build ${status}",
+        "sections": [
+            [
+                "activityTitle": "**${jobName}**",
+                "activitySubtitle": "Build #${buildNumber}",
+                "facts": [
+                    [
+                        "name": "Status:",
+                        "value": status
+                    ],
+                    [
+                        "name": "Duration:",
+                        "value": buildDuration
+                    ],
+                    [
+                        "name": "Triggered By:",
+                        "value": triggeredBy
+                    ],
+                    [
+                        "name": "Folder:",
+                        "value": folderName
+                    ]
+                ],
+                "text": customMessage
+            ]
+        ],
+        "potentialAction": [
+            [
+                "@type": "OpenUri",
+                "name": "View Build",
+                "targets": [
+                    [
+                        "os": "default",
+                        "uri": buildUrl
+                    ]
+                ]
+            ]
+        ]
+    ]
+    
+    // Add failure details if build failed
+    if (status == 'FAILURE' || status == 'UNSTABLE') {
+        def failureDetails = getFailureDetails()
+        if (failureDetails) {
+            payload.sections[0].facts << [
+                "name": "Failure Reason:",
+                "value": failureDetails
+            ]
+        }
+    }
+    
+    // Write JSON payload to temporary file
+    def jsonPayload = groovy.json.JsonOutput.toJson(payload)
+    def tempFile = "${env.WORKSPACE}/teams-payload-${env.BUILD_NUMBER}.json"
+    
+    writeFile file: tempFile, text: jsonPayload
+    
+    // Send notification using curl
+    sendTeamsNotification(webhookUrl, tempFile)
+    
+    // Clean up temp file
+    sh "rm -f ${tempFile}"
+}
+
+def getFolderName() {
+    try {
+        def jobUrl = env.JOB_URL
+        
+        if (!jobUrl) {
+            echo "JOB_URL not available, falling back to JOB_NAME parsing"
+            def jobName = env.JOB_NAME
+            if (jobName.contains('/')) {
+                def parts = jobName.split('/')
+                return parts[0]
+            }
+            return 'default'
+        }
+        
+        // Parse URL to extract 7th word after slash
+        // Example: https://jenkins.example.com/job/folder1/job/folder2/job/jobname/
+        // Split by '/' and get the 7th element (index 6)
+        def urlParts = jobUrl.split('/')
+        
+        echo "Job URL: ${jobUrl}"
+        echo "URL parts count: ${urlParts.size()}"
+        
+        // The 7th word after slash would be at index 6 (0-based)
+        if (urlParts.size() > 6) {
+            def folderName = urlParts[6]
+            echo "Extracted folder name from URL position 7: ${folderName}"
+            return folderName
+        } else {
+            echo "URL doesn't have enough parts, using default"
+            return 'default'
+        }
+    } catch (Exception e) {
+        echo "Error extracting folder name: ${e.message}"
+        return 'default'
+    }
+}
+
+def getWebhookUrlForFolder(folderName) {
+    try {
+        // Load properties file from resources
+        def propsContent = libraryResource 'teams-webhooks.properties'
+        def props = new Properties()
+        props.load(new StringReader(propsContent))
+        
+        // Try to get folder-specific URL
+        def webhookUrl = props.getProperty("teams.webhook.${folderName}")
+        
+        // Fallback to default if folder-specific not found
+        if (!webhookUrl) {
+            echo "No specific webhook found for folder '${folderName}', using default"
+            webhookUrl = props.getProperty('teams.webhook.default')
+        }
+        
+        return webhookUrl
+    } catch (Exception e) {
+        error "Failed to load Teams webhook configuration: ${e.message}"
+    }
+}
+
+def sendTeamsNotification(webhookUrl, jsonFile) {
+    try {
+        def curlCommand = """
+            curl -X POST '${webhookUrl}' \
+            -H 'Content-Type: application/json' \
+            -d @${jsonFile} \
+            --silent \
+            --show-error \
+            --fail
+        """
+        
+        def result = sh(script: curlCommand, returnStatus: true)
+        
+        if (result == 0) {
+            echo "Teams notification sent successfully"
+        } else {
+            echo "Failed to send Teams notification. Curl exit code: ${result}"
+        }
+    } catch (Exception e) {
+        echo "Error sending Teams notification: ${e.message}"
+    }
+}
+
+def getColorByStatus(status) {
+    def colors = [
+        'SUCCESS': '00FF00',
+        'FAILURE': 'FF0000',
+        'UNSTABLE': 'FFA500',
+        'ABORTED': '808080',
+        'NOT_BUILT': '808080'
+    ]
+    return colors[status] ?: '0078D7'
+}
+
+def getEmojiByStatus(status) {
+    def emojis = [
+        'SUCCESS': '✅',
+        'FAILURE': '❌',
+        'UNSTABLE': '⚠️',
+        'ABORTED': '🛑',
+        'NOT_BUILT': '⏸️'
+    ]
+    return emojis[status] ?: 'ℹ️'
+}
+
+def getTriggeredBy() {
+    def causes = currentBuild.getBuildCauses()
+    if (causes) {
+        def cause = causes[0]
+        if (cause._class.contains('UserIdCause')) {
+            return cause.userId ?: 'Manual Trigger'
+        } else if (cause._class.contains('SCMTrigger')) {
+            return 'SCM Change'
+        } else if (cause._class.contains('TimerTrigger')) {
+            return 'Scheduled'
+        } else if (cause._class.contains('UpstreamCause')) {
+            return "Upstream: ${cause.upstreamProject}"
+        }
+    }
+    return 'Unknown'
+}
+
+def isTriggeredByServiceAccount() {
+    try {
+        def causes = currentBuild.getBuildCauses()
+        if (causes) {
+            for (cause in causes) {
+                // Check if triggered by a user
+                if (cause._class.contains('UserIdCause')) {
+                    def userId = cause.userId ?: ''
+                    def userName = cause.userName ?: ''
+                    
+                    echo "Triggered by user: ${userId} (${userName})"
+                    
+                    // Check if user ID or name contains 'svc' (case-insensitive)
+                    if (userId.toLowerCase().contains('svc') || userName.toLowerCase().contains('svc')) {
+                        echo "Service account detected: ${userId}"
+                        return true
+                    }
+                }
+            }
+        }
+        
+        // Also check BUILD_USER_ID environment variable if available
+        if (env.BUILD_USER_ID && env.BUILD_USER_ID.toLowerCase().contains('svc')) {
+            echo "Service account detected from BUILD_USER_ID: ${env.BUILD_USER_ID}"
+            return true
+        }
+        
+    } catch (Exception e) {
+        echo "Error checking for service account: ${e.message}"
+    }
+    
+    return false
+}
+
+def getFailureDetails() {
+    try {
+        def log = currentBuild.rawBuild.getLog(50)
+        def errorLines = log.findAll { it.contains('ERROR') || it.contains('FAILED') || it.contains('Exception') }
+        if (errorLines) {
+            return errorLines.take(3).join(' | ')
+        }
+    } catch (Exception e) {
+        echo "Could not retrieve failure details: ${e.message}"
+    }
+    return 'Check build logs for details'
+}
