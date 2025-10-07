@@ -1,0 +1,47 @@
+1. Use `curl` command to send HTTP POST request to Teams channel URL
+2. Request headers:
+      - Content-Type: application/json
+      - Accept: application/json
+3. Payload: buildDataJson (build details)
+4. Print response code from Teams API
+
+1. Read pipeline configuration file (e.g., `newFlow-urls.properties`)
+2. Match the build URL pattern to identify product (e.g., "JVO/XYZ")
+3. Return the mapped Teams webhook URL for that product
+4. If no match found → return null
+
+
+1. Get current build result (SUCCESS, FAILURE, etc.)
+   → buildStatus = currentBuild.result
+   → stageName = "NA"
+
+2. If build failed:
+      - Mark stage name as "FailedStage"
+
+3. Retrieve user details who triggered the build
+   → userInfo = getBuildTriggeredUserDetails()
+   → buildTriggerUserName = userInfo.userName
+   → buildTriggerUserEmail = userInfo.userEmail
+
+4. Skip notification if triggered by service account
+   → If buildTriggerUserName contains "svc-app" → exit
+
+5. Prepare build metadata:
+      - Build URL
+      - Build number
+      - Triggered by (user)
+      - Build status
+      - Stage name
+
+6. Convert metadata to JSON string
+   → buildDataJson = JSON.stringify(buildData)
+
+7. Determine the correct Teams channel URL:
+      - Read from pipeline config properties
+      - Extract based on build URL or product pattern
+
+8. Send notification only if Teams channel URL is valid
+   → notifyTeams(buildDataJson, channelUrl)
+
+
+
