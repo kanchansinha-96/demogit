@@ -1,0 +1,23 @@
+Function call():
+
+    1. Get the build cause of the current Jenkins build.
+       → buildCause = currentBuild.rawBuild.getCause(UserIdCause)
+
+    2. Extract the user ID from the build cause.
+       → userId = buildCause.getUserId()
+
+    3. Fetch the user data object using the user ID.
+       → userData = User.get(userId)
+
+    4. Get the user's email address from their mail property (if available).
+       → mailProp = userData.getProperty(Mailer.UserProperty)
+       → userEmail = mailProp ? mailProp.getAddress() : null
+
+    5. Get the user's display name.
+       → userName = userData.getDisplayName()
+
+    6. Return user details as a map:
+       → return {
+            userName: userName,
+            userEmail: userEmail
+         }
