@@ -1,0 +1,32 @@
+
+import jenkins.*
+import jenkins.model.*
+import hudson.*
+import hudson.model.*
+import com.cloudbees.plugins.credentials.*
+import com.cloudbees.plugins.credentials.domains.*
+import groovy.json.JsonSlurper
+
+// ---- READ PARAMETERS SAFELY ----
+def REPOSITORY_NAME = binding.hasVariable('REPOSITORY_NAME') ? REPOSITORY_NAME : params.REPOSITORY_NAME
+def LAST_DEPLOYED_VERSION = binding.hasVariable('LAST_DEPLOYED_VERSION') ? LAST_DEPLOYED_VERSION : params.LAST_DEPLOYED_VERSION
+
+// ---- FETCH CREDENTIALS ----
+def creds = CredentialsProvider.lookupCredentials(
+    com.cloudbees.plugins.credentials.Credentials.class,
+    Jenkins.instance,
+    null,
+    null
+).find { it.id == "UDEPLOY_PROD_CREDENTIALS" }
+
+if (!creds) {
+    return "<html><body><h3 style='color:red;'>Error: UDEPLOY_PROD_CREDENTIALS not found</h3></body></html>"
+}
+
+// ---- CALL FUNCTION TO GET VERSION ----
+return getLastDeployedVersion(
+    creds.username.toString(),
+    creds.password.toString(),
+    REPOSITORY_NAME,
+    LAST_DEPLOYED_VERSION
+)
