@@ -1,0 +1,61 @@
+import jenkins.model.*
+import hudson.model.*
+import com.cloudbees.plugins.credentials.*
+import com.cloudbees.plugins.credentials.common.*
+import com.cloudbees.plugins.credentials.domains.*
+import groovy.json.JsonSlurper
+
+// --- READ PARAMETERS SAFELY ---
+def REPOSITORY_NAME = params.REPOSITORY_NAME ?: "enterprise-paymybill-payment-methods-sync-up-testing"
+def LAST_DEPLOYED_VERSION = params.LAST_DEPLOYED_VERSION ?: ""
+
+// --- FETCH CREDENTIALS ---
+def credentials = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+    com.cloudbees.plugins.credentials.common.StandardCredentials.class,
+    Jenkins.instance,
+    null,
+    null
+).find { it.id == "UDBPLOY_PROD_CREDENTIALS" }
+
+if (!credentials) {
+    return "<html><body><h3 style='color:red'>Error: UDBPLOY_PROD_CREDENTIALS not found</h3></body></html>"
+}
+
+// --- CALL FUNCTION TO GET VERSION ---
+return getLastDeployedVersion(credentials, REPOSITORY_NAME, LAST_DEPLOYED_VERSION)
+
+// --- FUNCTION TO GET LAST DEPLOYED VERSION ---
+def getLastDeployedVersion(credentials, repoName, lastDeployedVersion) {
+    try {
+        // Your logic to fetch the version using the credentials
+        // This will depend on your specific deployment system/API
+        
+        // Example placeholder - replace with your actual version fetching logic
+        def version = fetchVersionFromDeploymentSystem(credentials, repoName)
+        
+        if (version) {
+            return version
+        } else {
+            return "Version not found for repository: ${repoName}"
+        }
+    } catch (Exception e) {
+        return "Error fetching version: ${e.message}"
+    }
+}
+
+// --- PLACEHOLDER FOR YOUR VERSION FETCHING LOGIC ---
+def fetchVersionFromDeploymentSystem(credentials, repoName) {
+    // Implement your actual logic here to fetch the version
+    // This might involve:
+    // - HTTP requests to your deployment API
+    // - Checking artifact repositories
+    // - Querying deployment databases
+    // - Reading from deployment manifests
+    
+    // Example:
+    // def apiUrl = "https://your-deployment-api.com/versions/${repoName}"
+    // def response = httpRequestWithAuth(apiUrl, credentials)
+    // return parseVersionFromResponse(response)
+    
+    return "v1.2.3" // Replace with actual implementation
+}
