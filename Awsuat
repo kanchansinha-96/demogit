@@ -1,0 +1,215 @@
+def call(def uDeployApplicationName = null, def gitRepositoryName, def appVersion, def pcfSpace) {
+    
+    def envProperty = loadEnvironmentProperties()
+    def jdkVersion = envProperty.default_jdk
+    def uDeployUrl = envProperty.udeploy_host_url
+    def uDeployCli = envProperty.udeploy_cli_path
+    def uDeployCredential = envProperty.udeploy_auth_credential_id
+    def uDeployAppName = uDeployApplicationName ?: envProperty.udeploy_app_name
+    
+    def uDeployComponentName = uDeployAppName + '_' + gitRepositoryName
+    def uDeployComponentVersion = appVersion
+    def uDeployDeployProcess = gitRepositoryName + '_uat_process'
+    
+    // Initialize all deployment flags
+    def uat1East1Deploy = "YES"
+    def uat1East2Deploy = "YES"
+    def uat2DalDeploy = "YES"
+    def uat2PhxDeploy = "YES"
+    def uat3DalDeploy = "YES"
+    def uat3PhxDeploy = "YES"
+    def uatEastDeploy = "YES"
+    def uatWestDeploy = "YES"
+    
+    // Get foundation availability data
+    def foundationData = getPcfFoundationAvailability()
+    
+    // Check foundation availability and update deployment flags
+    if (!foundationData.toString().equalsIgnoreCase("NA")) {
+        // UAT1 East deployments
+        uat1East1Deploy = (foundationData.DEV1EAST1?.equalsIgnoreCase('N')) ? "N" : "YES"
+        uat1East2Deploy = (foundationData.DEV1EAST2?.equalsIgnoreCase('N')) ? "N" : "YES"
+        
+        // UAT2 deployments
+        uat2DalDeploy = (foundationData.DEV2DAL?.equalsIgnoreCase('N')) ? "N" : "YES"
+        uat2PhxDeploy = (foundationData.DEV2PHX?.equalsIgnoreCase('N')) ? "N" : "YES"
+        
+        // UAT3 deployments
+        uat3DalDeploy = (foundationData.DEV3DAL?.equalsIgnoreCase('N')) ? "N" : "YES"
+        uat3PhxDeploy = (foundationData.DEV3PHX?.equalsIgnoreCase('N')) ? "N" : "YES"
+        
+        // UAT East/West deployments
+        uatEastDeploy = (foundationData.DEVEAST?.equalsIgnoreCase('N')) ? "N" : "YES"
+        uatWestDeploy = (foundationData.DEVWEST?.equalsIgnoreCase('N')) ? "N" : "YES"
+    }
+    
+    // Update version properties for all deployment environments
+    uDeployVersionPropUpdate(uDeployComponentName, "UAT1East1Deploy", uat1East1Deploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UAT1East2Deploy", uat1East2Deploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UAT2DalDeploy", uat2DalDeploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UAT2PhxDeploy", uat2PhxDeploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UAT3DalDeploy", uat3DalDeploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UAT3PhxDeploy", uat3PhxDeploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UATEastDeploy", uatEastDeploy, appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName, "UATWestDeploy", uatWestDeploy, appVersion)
+    
+    // Create JSON payload for deployment
+    def jsonPayload = """
+{
+    "application": "\${uDeployAppName}",
+    "environment": "\${pcfSpace}",
+    "applicationProcess": "\${uDeployDeployProcess}",
+    "versions": [{"component": "\${uDeployComponentName}", "version": "\${uDeployComponentVersion}"}],
+    "properties": {"deployOnlyChanged": false},
+    "description": "Deployed via CLI from Jenkins Build #\${env.BUILD_NUMBER}"
+}"""
+    
+    // Write deployment properties file
+    writeFile file: 'deployment-properties.json', text: jsonPayload
+    
+    // Execute deployment with credentials
+    withEnv(["JAVA_HOME=\${tool jdkVersion}", "PATH+JAVA=\${tool jdkVersion}/bin"]) {
+        withCredentials([usernamePassword(credentialsId: uDeployCredential, 
+                                          usernameVariable: 'USERNAME', 
+                                          passwordVariable: 'PASSWORD')]) {
+            def deploymentRequest = sh(returnStdout: true,
+                script: """
+                    \${uDeployCli} \\
+                    -weburl \${uDeployUrl} \\
+                    -username \${USERNAME} \\
+                    -password \${PASSWORD} \\
+                    requestApplicationProcess deployment-properties.json
+                """).trim()
+            
+            echo "Deployment Request Response: \${deploymentRequest}"
+            
+            // Parse request ID from response
+            def requestId = parseRequestId(deploymentRequest)
+            
+            if (requestId) {
+                echo "Monitoring deployment with Request ID: \${requestId}"
+                monitorDeployment(requestId, uDeployUrl, uDeployCli)
+            } else {
+                error "Failed to extract Request ID from deployment response"
+            }
+        }
+    }
+}
+
+// Helper function to update UDeploy version properties
+def uDeployVersionPropUpdate(componentName, propertyName, propertyValue, version) {
+    echo "Updating property ${propertyName} = ${propertyValue} for component ${componentName}, version ${version}"
+    // Implementation would call UDeploy CLI to update version properties
+    // This is a placeholder for the actual implementation
+}
+
+// Helper function to get PCF foundation availability
+def getPcfFoundationAvailability() {
+    try {
+        // This would typically call an API or read from a configuration
+        // Returning a map structure for foundation availability
+        def availability = [:]
+        
+        // Example: Read from a REST API or configuration file
+        // For now, returning a default structure
+        return availability
+    } catch (Exception e) {
+        echo "Warning: Could not retrieve foundation availability data: ${e.message}"
+        return [:]
+    }
+}
+
+// Helper function to load environment properties
+def loadEnvironmentProperties() {
+    def props = [:]
+    
+    // Load from environment or configuration files
+    props.default_jdk = env.DEFAULT_JDK ?: 'JDK11'
+    props.udeploy_host_url = env.UDEPLOY_URL ?: 'https://udeploy.example.com'
+    props.udeploy_cli_path = env.UDEPLOY_CLI_PATH ?: '/opt/udeploy-cli/udclient'
+    props.udeploy_auth_credential_id = env.UDEPLOY_CREDENTIAL_ID ?: 'udeploy-credentials'
+    props.udeploy_app_name = env.UDEPLOY_APP_NAME ?: ''
+    
+    return props
+}
+
+// Helper function to parse request ID from deployment response
+def parseRequestId(responseText) {
+    try {
+        // Expected response format: {"requestId": "12345-67890-abcdef"}
+        def jsonSlurper = new groovy.json.JsonSlurper()
+        def response = jsonSlurper.parseText(responseText)
+        return response.requestId
+    } catch (Exception e) {
+        echo "Error parsing request ID: ${e.message}"
+        
+        // Try regex pattern matching as fallback
+        def matcher = responseText =~ /requestId["\s:]+([a-zA-Z0-9-]+)/
+        if (matcher.find()) {
+            return matcher.group(1)
+        }
+        return null
+    }
+}
+
+// Helper function to monitor deployment status
+def monitorDeployment(requestId, uDeployUrl, uDeployCli, maxWaitMinutes = 30) {
+    def maxAttempts = maxWaitMinutes * 2 // Check every 30 seconds
+    def attempt = 0
+    def completed = false
+    def successful = false
+    
+    while (attempt < maxAttempts && !completed) {
+        sleep(30) // Wait 30 seconds between checks
+        attempt++
+        
+        withCredentials([usernamePassword(credentialsId: env.UDEPLOY_CREDENTIAL_ID,
+                                          usernameVariable: 'USERNAME',
+                                          passwordVariable: 'PASSWORD')]) {
+            def status = sh(returnStdout: true,
+                script: """
+                    ${uDeployCli} \\
+                    -weburl ${uDeployUrl} \\
+                    -username \${USERNAME} \\
+                    -password \${PASSWORD} \\
+                    getApplicationProcessRequestStatus -request ${requestId}
+                """).trim()
+            
+            echo "Deployment Status (Attempt ${attempt}/${maxAttempts}): ${status}"
+            
+            // Parse status
+            if (status.contains("CLOSED") || status.contains("SUCCESS") || status.contains("SUCCEEDED")) {
+                completed = true
+                successful = true
+                echo "✓ Deployment completed successfully!"
+            } else if (status.contains("FAILED") || status.contains("FAULTED") || status.contains("CANCELED")) {
+                completed = true
+                successful = false
+                error "✗ Deployment failed with status: ${status}"
+            } else if (status.contains("EXECUTING") || status.contains("PENDING")) {
+                echo "→ Deployment still in progress..."
+            }
+        }
+    }
+    
+    if (!completed) {
+        error "Deployment monitoring timed out after ${maxWaitMinutes} minutes"
+    }
+    
+    return successful
+}
+
+// Alternative entry point for AWS deployments
+def deployToAws(def uDeployApplicationName = null, def gitRepositoryName, def appVersion, def awsEnvironment) {
+    echo "Deploying to AWS environment: ${awsEnvironment}"
+    // AWS-specific deployment logic would go here
+    // This can reuse much of the same logic with AWS-specific modifications
+    call(uDeployApplicationName, gitRepositoryName, appVersion, awsEnvironment)
+}
+
+// Alternative entry point for artifact deployments
+def deployArtifact(def uDeployApplicationName = null, def gitRepositoryName, def appVersion, def targetSpace) {
+    echo "Deploying artifact to target space: ${targetSpace}"
+    // Artifact-specific deployment logic
+    call(uDeployApplicationName, gitRepositoryName, appVersion, targetSpace)
+}
