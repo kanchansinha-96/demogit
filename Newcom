@@ -1,0 +1,146 @@
+#!/usr/bin/env groovy
+
+def call(def uDeployApplicationName = null, def gitRepositoryName, def appVersion, def pcfSpace){
+    
+    def envProperty = loadEnvironmentProperties()
+    def jdkVersion = envProperty.default_jdk
+    def uDeployUrl = envProperty.udeploy_host_url
+    def uDeployCli = envProperty.udeploy_cli_path
+    def uDeployCredential = envProperty.udeploy_auth_credential_id
+    def uDeployAppName = uDeployApplicationName ?: envProperty.udeploy_app_name
+    
+    def uDeployComponentName = uDeployAppName
+    def uDeployComponentVersion = appVersion
+    def uDeployDeployProcess = gitRepositoryName+'_qa-aws_process'
+    
+    def qa1stDeploy = "YES"
+    def qa1estDeploy = "YES"
+    def qa2naDeploy = "YES"
+    def qa2phDeploy = "YES"
+    def qa3naDeploy = "YES"
+    def qa3phDeploy = "YES"
+    def qa4naDeploy = "YES"
+    def qa4phDeploy = "YES"
+    def qatestDeploy = "YES"
+    def qawestDeploy = "YES"
+    
+    def foundationData = getOHFoundationAvailability()
+    if(!foundationData.toString().equalsIgnoreCase("NA")){
+        qa1stDeploy = (foundationData.DEV1ASI.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa1estDeploy = (foundationData.DEV1ASI.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa2naDeploy = (foundationData.DEV2NAL.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa2phDeploy = (foundationData.DEV2NAL.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa3naDeploy = (foundationData.DEV3NAL.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa3phDeploy = (foundationData.DEV3PAX.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa4naDeploy = (foundationData.DEV4NAL.equalsIgnoreCase('N')) ? "N" : "YES"
+        qa4phDeploy = (foundationData.DEV4PAX.equalsIgnoreCase('N')) ? "N" : "YES"
+        qatestDeploy = (foundationData.DEV4ASI.equalsIgnoreCase('N')) ? "N" : "YES"
+        qawestDeploy = (foundationData.DEV4ASI.equalsIgnoreCase('N')) ? "N" : "YES"
+    }
+    
+    uDeployVersionPropUpdate(uDeployComponentName,"QA1stDeploy",qa1stDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA1estDeploy",qa1estDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA2naDeploy",qa2naDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA2phDeploy",qa2phDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA3naDeploy",qa3naDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA3phDeploy",qa3phDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA4naDeploy",qa4naDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"QA4phDeploy",qa4phDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"qatestDeploy",qatestDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"qawestDeploy",qawestDeploy,appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa1st-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa1est-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa2na-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa2ph-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa3na-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa3ph-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa4na-version",appVersion)
+    uDeployVersionPropUpdate(uDeployComponentName,"last-deployed-qa4ph-version",appVersion)
+    
+    def jsonPayload = """
+{
+    "application": "${uDeployAppName}",
+    "environment": "${pcfSpace}",
+    "applicationProcess": "${uDeployDeployProcess}",
+    "versions": [{"component": "${uDeployComponentName}", "version": "${uDeployComponentVersion}"}],
+    "properties": {"deployOnlyChanged": false},
+    "description": "Deployed via CLI from Jenkins Build #${env.BUILD_NUMBER}"
+}
+"""
+    
+    writeFile file: 'deployment-properties.json', text: jsonPayload
+    
+    withEnv(["JAVA_HOME=${tool jdkVersion}", "PATH+JAVA=${tool jdkVersion}/bin"]){
+        withCredentials([usernamePassword(credentialsId: uDeployCredential, usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]){
+            def deploymentRequest = sh(returnStdout: true,
+                script: """
+                    ${uDeployCli} \
+                    -weburl "${uDeployUrl}" \
+                    -username "${USERNAME}" \
+                    -password "${PASSWORD}" \
+                    requestApplicationProcess deployment-properties.json
+                """).trim()
+            
+            def deploymentRequestResponse = readJSON text: deploymentRequest
+            def deploymentRequestId = deploymentRequestResponse.requestId
+            
+            println "INFO: Deployment is triggered, request id for this deployment: ${deploymentRequestId}"
+            
+            def deploymentRequestCurrentStatus = "EXECUTING"
+            def attempts = 0 as Integer
+            def maxAttempts = 30 as Integer
+            
+            while(deploymentRequestCurrentStatus in ["EXECUTING", "SCHEDULED"] && attempts < maxAttempts){
+                sleep 60
+                attempts++
+                
+                def deploymentRequestStatus = sh(returnStdout: true,
+                    script: """
+                        ${uDeployCli} \
+                        -weburl "${uDeployUrl}" \
+                        -username "${USERNAME}" \
+                        -password "${PASSWORD}" \
+                        getApplicationProcessRequestStatus \
+                        -request ${deploymentRequestId}
+                    """).trim()
+                
+                def deploymentRequestStatusResponse = readJSON text: deploymentRequestStatus
+                deploymentRequestCurrentStatus = deploymentRequestStatusResponse.status
+                deploymentRequestStatusResult = deploymentRequestStatusResponse.result
+                
+                println "INFO: Deployment status check attempt: ${attempts}, current status: ${deploymentRequestCurrentStatus}, result: ${deploymentRequestStatusResult}"
+            }
+            
+            if(deploymentRequestStatusResult.equals('SUCCEEDED')){
+                println "INFO: Deployment is successful"
+            }else{
+                buildFailed("Deployment failed, please check the log in uDeploy")
+            }
+        }
+    }
+    
+    if(qa1stDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa1st-version",appVersion)
+    }
+    if(qa1estDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa1est-version",appVersion)
+    }
+    if(qa2naDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa2na-version",appVersion)
+    }
+    if(qa2phDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa2ph-version",appVersion)
+    }
+    if(qa3naDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa3na-version",appVersion)
+    }
+    if(qa3phDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa3ph-version",appVersion)
+    }
+    if(qa4naDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa4na-version",appVersion)
+    }
+    if(qa4phDeploy.equalsIgnoreCase("YES")){
+        uDeployComponentPropUpdate(uDeployComponentName,"last-deployed-qa4ph-version",appVersion)
+    }
+}
