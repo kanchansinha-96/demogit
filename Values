@@ -1,0 +1,165 @@
+# Helm Override Values
+# This file contains environment-specific overrides for database connection strings and secrets
+
+# Deployment-specific database connection strings
+# Override the args/command in the deployment
+deployment:
+  enabled: true
+  
+containers:
+  args:
+    - |
+      export DECISIONS_DATABASECONNECTSTRING="Host=decn-rds-dev.fitchratings.com;Database=decn_engine;Port=5432;Username=decnuser;Password=${RDS_PASSWORD};TrustServerCertificate=True"
+      export DECISIONS_CLUSTERING_REDISBASEURL="redis.decisions.svc.cluster.local:6379,password=${REDIS_PASSWORD}"
+      exec dotnet /opt/decisions/bin/decisions.Web.Core.dll
+
+# Secret configuration - AWS Secrets Manager External Secrets
+secret:
+  enabled: true
+  
+externalSecrets:
+  provider: aws
+  secretObjects:
+    - secretName: redis-password
+      type: Opaque
+      data:
+        - objectName: redis_password
+          key: redis_password
+        - objectName: rds_password
+          key: rds_password
+  
+  parameters:
+    objects:
+      - objectName: "arn:aws:secretsmanager:us-east-1:247027456183:secret:fr-dev-pca-aur-red-decn-06Irph"
+        objectAlias: "secretsmanager"
+        jmesPath:
+          - path: redis_password
+            objectAlias: redis_password
+          - path: rds_password
+            objectAlias: rds_password
+
+# Metadata configuration
+metadata:
+  name: decisions-github
+  namespace: fr-crossec-decn
+  env: dev
+  labels:
+    my-app: decisions-github
+    tags.datadoghq.com/env: dev
+    tags.datadoghq.com/service: decisions-github
+    tags.datadoghq.com/version: latest
+
+# Service configuration
+service:
+  enabled: true
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+
+# Replica configuration
+replicas: 1
+
+# Container configuration
+serviceAccountName: dev-fr-crossec-decn-sa
+
+# Image configuration
+image: "651948663039.dkr.ecr.us-east-1.amazonaws.com/fr-crossec-decn:decn-master"
+imagePullPolicy: Always
+
+# Resource limits
+resources:
+  requests:
+    cpu: 1
+    memory: 1Gi
+  limits:
+    cpu: 2
+    memory: 8Gi
+
+# Health checks
+livenessProbe:
+  httpGet:
+    path: /home/healthcheck
+    port: 8080
+    scheme: HTTP
+  initialDelaySeconds: 120
+  periodSeconds: 600
+  successThreshold: 1
+  failureThreshold: 3
+  timeoutSeconds: 900
+
+readinessProbe:
+  httpGet:
+    path: /home/healthcheck
+    port: 8080
+    scheme: HTTP
+  initialDelaySeconds: 120
+  periodSeconds: 600
+  successThreshold: 3
+  failureThreshold: 3
+  timeoutSeconds: 900
+
+# Volume mounts
+volumeMounts:
+  - name: filestorage
+    mountPath: "/opt/decisions/data"
+    readOnly: false
+  - name: idmapd-config
+    mountPath: /etc/idmapd.conf
+    subPath: idmapd.conf
+  - name: secrets-store
+    mountPath: "/mnt/assecret"
+    readOnly: true
+
+# Volumes
+volumes:
+  - name: filestorage
+    persistentVolumeClaim:
+      claimName: dev-crossec-decn-pvc
+  - name: idmapd-config
+    configMap:
+      name: idmapd-config
+  - name: secrets-store
+    csi:
+      driver: secrets-store.csi.k8s.io
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: decisions-secret
+
+# Config volume mount configuration
+configVolume:
+  enabled: true
+
+# Ingress configuration (if applicable)
+ingressable:
+  enabled: false
+
+# Datadog tags
+datadogTags:
+  env: dev
+  service: decisions-github
+  version: latest
+
+# Probe configurations
+probe:
+  enabled: true
+  
+# Additional configurations
+RPA:
+  enabled: false
+
+MPA:
+  enabled: false
+
+HPA:
+  enabled: false
+
+secret:
+  enabled: true
+
+configmap:
+  enabled: true
+
+cronjob:
+  disabled: true
